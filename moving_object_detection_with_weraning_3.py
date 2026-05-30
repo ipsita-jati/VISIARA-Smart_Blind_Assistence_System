@@ -1,0 +1,746 @@
+from ultralytics import YOLO
+import cv2
+import pyttsx3
+import threading
+import time
+import numpy as np
+from collections import defaultdict, deque
+
+# =========================
+# SETTINGS
+# =========================
+VIDEO_PATH = "E:/ipsita_project/AI_smart_glass/4328047-uhd_3840_2160_30fps.mp4"
+
+# =========================
+# LOAD MODELS
+# =========================
+model_coco = YOLO("yolov8n.pt")
+
+model_custom = YOLO(
+    "E:/ipsita_project/AI_smart_glass/best_fine2.pt",
+    task="detect"
+)
+
+print("Models Loaded")
+
+# =========================
+# SPEAK FUNCTION
+# =========================
+def speak(text):
+
+    def run():
+
+        engine = pyttsx3.init()
+
+        engine.setProperty('rate', 160)
+        engine.setProperty('volume', 1.0)
+
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
+
+    threading.Thread(
+        target=run,
+        daemon=True
+    ).start()
+
+# =========================
+# SAFE DIRECTION
+# =========================
+def get_safe_direction(frame, boxes):
+
+    h, w, _ = frame.shape
+
+    left_danger = 0
+    right_danger = 0
+
+    for box in boxes:
+
+        x1, y1, x2, y2 = box
+
+        area = (x2 - x1) * (y2 - y1)
+
+        if area < 2500:
+            continue
+
+        cx = (x1 + x2) // 2
+
+        if cx < w // 2:
+            left_danger += 1
+        else:
+            right_danger += 1
+
+    if left_danger < right_danger:
+        return "Move left"
+
+    elif right_danger < left_danger:
+        return "Move right"
+
+    else:
+        return "Walk carefully"
+
+# =========================
+# VIDEO
+# =========================
+cap = cv2.VideoCapture(VIDEO_PATH)
+
+# =========================
+# VARIABLES
+# =========================
+last_detected_frame = None
+
+last_object_name = ""
+last_object_time = 0
+
+last_speak = 0
+delay = 6
+
+frame_count = 0
+skip_frames = 4
+
+# =========================
+# VEHICLE MOTION TRACKING
+# =========================
+vehicle_history = defaultdict(
+    lambda: deque(maxlen=3)
+)
+
+VEHICLE_CLASSES = [
+    "car",
+    "bus",
+    "truck",
+    "motorcycle",
+    "bicycle"
+]
+
+AREA_GROWTH_THRESHOLD = 1.20
+SIDE_MOVEMENT_THRESHOLD = 55
+BOTTOM_REGION = 0.50
+
+# =========================
+# MAIN LOOP
+# =========================
+while True:
+
+    ret, frame = cap.read()
+
+    if not ret:
+        break
+
+    frame = cv2.resize(frame, (512, 512))
+    original_frame = frame.copy()
+
+    frame_count += 1
+
+    if frame_count % skip_frames != 0:
+
+        if last_detected_frame is not None:
+            cv2.imshow(
+                "Smart Glass System",
+                last_detected_frame
+            )
+        else:
+            cv2.imshow(
+                "Smart Glass System",
+                frame
+            )
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+        continue
+
+    # =========================
+    # COCO DETECTION
+    # =========================
+    results1 = model_coco(
+        frame,
+        classes=[
+            0, 1, 2, 3, 5, 7, 9,
+            13, 14, 15, 16,
+            39, 45,
+            56, 58, 59,
+            60, 61, 67, 72,
+            73, 75
+        ],
+        conf=0.60
+    )
+
+    # =========================
+    # CUSTOM DETECTION
+    # =========================
+    results2 = model_custom(
+        frame,
+        conf=0.10,
+        iou=0.45,
+        agnostic_nms=False
+    )
+
+    frame = results1[0].plot()
+    frame = results2[0].plot(img=frame)
+
+    last_detected_frame = frame.copy()
+
+    h, w, _ = frame.shape
+
+    center_objects = []
+    all_boxes = []
+
+    # =========================
+    # PROCESS OBJECTS
+    # =========================
+    for results, model in [
+        (results1, model_coco),
+        (results2, model_custom)
+    ]:
+
+        for r in results:
+
+            for box in r.boxes:
+
+                x1, y1, x2, y2 = map(
+                    int,
+                    box.xyxy[0]
+                )
+
+                all_boxes.append(
+                    (x1, y1, x2, y2)
+                )
+
+                area = (
+                    (x2 - x1) *
+                    (y2 - y1)
+                )
+
+                cls = int(box.cls[0])
+
+                name = model.names[cls]
+
+                conf = float(box.conf[0])
+
+                cx = int((x1 + x2) / 2)
+                cy = int((y1 + y2) / 2)
+
+                # Ignore top-half objects
+                # But always allow traffic light
+                if (
+                    cy < h * 0.50
+                    and name != "traffic light"
+                ):
+                    continue
+
+                # =========================
+                # FILTERS
+                # =========================
+                if (
+                    name == "wall"
+                    and conf < 0.90
+                ):
+                    continue
+
+                if (
+                    name == "tree"
+                    and conf < 0.70
+                ):
+                    continue
+
+                if (
+                    name == "steps"
+                    and conf < 0.45
+                ):
+                    continue
+
+                if (
+                    name == "open manhole"
+                    and conf < 0.90
+                ):
+                    continue
+
+                if (
+                    name == "close door"
+                    and conf < 0.20
+                ):
+                    continue
+
+                if (
+                    name == "pothole"
+                    and area < 1500
+                ):
+                    continue
+
+                # Ignore small/far objects
+                if area < 5000:
+                    continue
+
+                # =========================
+                # CENTER AREA
+                # =========================
+                if (
+                    w * 0.28 < cx < w * 0.72
+                    and
+                    name != "traffic light"
+                ):
+
+                    center_objects.append({
+                        "name": name,
+                        "area": area
+                    })
+
+                # =========================
+                # TRAFFIC LIGHT DETECTION
+                # =========================
+                if name == "traffic light":
+
+                    light_crop = frame[y1:y2, x1:x2]
+
+                    if light_crop.size > 0:
+
+                        light_crop = cv2.resize(light_crop, (60, 120))
+
+                        h_crop = light_crop.shape[0]
+
+                        top = light_crop[0:h_crop//3, :]
+                        middle = light_crop[h_crop//3:2*h_crop//3, :]
+                        bottom = light_crop[2*h_crop//3:h_crop, :]
+
+                        hsv_top = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
+                        hsv_middle = cv2.cvtColor(middle, cv2.COLOR_BGR2HSV)
+                        hsv_bottom = cv2.cvtColor(bottom, cv2.COLOR_BGR2HSV)
+
+                        # RED
+                        lower_red1 = np.array([0, 120, 70])
+                        upper_red1 = np.array([10, 255, 255])
+
+                        lower_red2 = np.array([170, 120, 70])
+                        upper_red2 = np.array([180, 255, 255])
+
+                        red_mask1 = cv2.inRange(
+                            hsv_top,
+                            lower_red1,
+                            upper_red1
+                        )
+
+                        red_mask2 = cv2.inRange(
+                            hsv_top,
+                            lower_red2,
+                            upper_red2
+                        )
+
+                        red_mask = red_mask1 + red_mask2
+
+                        # GREEN
+                        lower_green = np.array([40, 40, 40])
+                        upper_green = np.array([90, 255, 255])
+
+                        green_mask = cv2.inRange(
+                            hsv_bottom,
+                            lower_green,
+                            upper_green
+                        )
+
+                        # YELLOW
+                        lower_yellow = np.array([15, 150, 150])
+                        upper_yellow = np.array([30, 255, 255])
+
+                        yellow_mask = cv2.inRange(
+                            hsv_middle,
+                            lower_yellow,
+                            upper_yellow
+                        )
+
+                        red_pixels = cv2.countNonZero(red_mask)
+                        green_pixels = cv2.countNonZero(green_mask)
+                        yellow_pixels = cv2.countNonZero(yellow_mask)
+
+                        traffic_signal = None
+
+                        threshold = 40
+
+                        if (
+                            red_pixels > threshold and
+                            red_pixels > green_pixels and
+                            red_pixels > yellow_pixels
+                        ):
+
+                            traffic_signal = "Traffic light detected. Red light"
+
+                        elif (
+                            green_pixels > threshold and
+                            green_pixels > red_pixels and
+                            green_pixels > yellow_pixels
+                        ):
+
+                            traffic_signal = "Traffic light detected. Green light"
+
+                        elif (
+                            yellow_pixels > threshold and
+                            yellow_pixels > red_pixels and
+                            yellow_pixels > green_pixels
+                        ):
+
+                            traffic_signal = "Traffic light detected. Yellow light"
+
+                        if traffic_signal:
+
+                            cv2.putText(
+                                frame,
+                                traffic_signal,
+                                (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                (0, 255, 0),
+                                2
+                            )
+
+                            current_time = time.time()
+
+                            if current_time - last_speak >= 3:
+
+                                print(traffic_signal)
+
+                                threading.Thread(
+                                    target=speak,
+                                    args=(traffic_signal,),
+                                    daemon=True
+                                ).start()
+
+                                last_speak = current_time
+
+    # =========================
+    # OBJECT WARNING SYSTEM
+    # =========================
+    if center_objects:
+
+        nearest = max(
+            center_objects,
+            key=lambda x: x["area"]
+        )
+
+        current_object = nearest["name"]
+
+        nearest_area = nearest["area"]
+
+        current_time = time.time()
+
+        text = None
+
+        # =========================
+        # POTHOLE
+        # =========================
+        if current_object == "pothole": 
+            if nearest_area > 4000: 
+                direction = get_safe_direction(
+                    frame, all_boxes
+                ) 
+                text = (
+                    f"Pothole ahead. " 
+                    f"{direction}" 
+                )
+            else: 
+                text = ( 
+                    "Small pothole ahead. "
+                    "Walk carefully in slow speed" 
+                )
+        # =========================
+        # STAIRS / STEPS
+        # =========================
+        elif current_object in [
+            "stair",
+            "steps"
+        ]:
+
+            text = (
+                f"{current_object} ahead. "
+                "Walk carefully"
+            )
+
+        # =========================
+        # CLOSE DOOR
+        # =========================
+        elif current_object == "close door":
+
+            direction = get_safe_direction(
+                frame,
+                all_boxes
+            )
+
+            text = (
+                "Close door ahead. " 
+                "Carefully open the door then enter or " 
+                f"{direction}" 
+            )
+
+        # =========================
+        # BIG OBJECTS
+        # =========================
+        elif current_object in [
+            "tree",
+            "wall",
+            "open manhole",
+            "person",
+            "toilet",
+            "potted plant",
+            "chair",
+            "bench",
+            "bird",
+            "cat",
+            "dog",
+            "bed",
+            "dining table",
+            "refrigerator"
+        ]:
+
+            direction = get_safe_direction(
+                frame,
+                all_boxes
+            )
+
+            text = (
+                f"{current_object} ahead. "
+                f"{direction}"
+            )
+
+        # =========================
+        # SMART VEHICLE DETECTION
+        # =========================
+        elif current_object in [
+            "car",
+            "bus",
+            "truck",
+            "motorcycle",
+            "bicycle"
+        ]:
+
+            nearest_box = None
+            nearest_area2 = 0
+
+            # Find nearest vehicle box
+            for results, model in [
+                (results1, model_coco),
+                (results2, model_custom)
+            ]:
+
+                for r in results:
+
+                    for box in r.boxes:
+
+                        cls = int(box.cls[0])
+                        name = model.names[cls]
+
+                        if name != current_object:
+                            continue
+
+                        x1, y1, x2, y2 = map(
+                            int,
+                            box.xyxy[0]
+                        )
+
+                        area = (
+                            (x2 - x1) *
+                            (y2 - y1)
+                        )
+
+                        if area > nearest_area2:
+
+                            nearest_area2 = area
+
+                            nearest_box = (
+                                x1, y1, x2, y2
+                            )
+
+            if nearest_box is not None:
+
+                x1, y1, x2, y2 = nearest_box
+
+                cx = (x1 + x2) // 2
+
+                cy = (y1 + y2) // 2
+
+                area = (
+                    (x2 - x1) *
+                    (y2 - y1)
+                )
+
+                # =========================
+                # ONLY BOTTOM HALF
+                # =========================
+                if cy > h * BOTTOM_REGION:
+
+                    # Save history
+                    vehicle_history[current_object].append(
+                        (cx, area)
+                    )
+
+                    text = None
+
+                    # Need 3 frames
+                    if len(
+                        vehicle_history[current_object]
+                    ) >= 3:
+
+                        old_x, old_area = (
+                            vehicle_history[current_object][0]
+                        )
+
+                        mid_x, mid_area = (
+                            vehicle_history[current_object][1]
+                        )
+
+                        new_x, new_area = (
+                            vehicle_history[current_object][2]
+                        )
+
+                        # =========================
+                        # AREA GROWTH
+                        # =========================
+                        if old_area > 0:
+
+                            growth_ratio = (
+                                new_area / old_area
+                            )
+
+                        else:
+
+                            growth_ratio = 1
+
+                        # =========================
+                        # SIDE MOVEMENT
+                        # =========================
+                        x_shift = abs(
+                            new_x - old_x
+                        )
+
+                        moving_left_to_right = (
+                            (new_x - old_x)
+                            > SIDE_MOVEMENT_THRESHOLD
+                        )
+
+                        moving_right_to_left = (
+                            (old_x - new_x)
+                            > SIDE_MOVEMENT_THRESHOLD
+                        )
+
+                        # =========================
+                        # APPROACHING
+                        # =========================
+                        approaching = (
+                            growth_ratio >
+                            AREA_GROWTH_THRESHOLD
+                        )
+
+                        # =========================
+                        # CENTER REGION
+                        # =========================
+                        center_region = (
+                            w * 0.35 <
+                            new_x <
+                            w * 0.65
+                        )
+
+                        # =========================
+                        # VEHICLE COMING TOWARD USER
+                        # Straight + Diagonal
+                        # =========================
+                        if approaching:
+
+                            danger = True
+
+                            direction = get_safe_direction(
+                                frame,
+                                all_boxes
+                            )
+
+                            text = (
+                                f"Warning! "
+                                f"{current_object} approaching. "
+                                f"{direction}"
+                            )
+                        # =========================
+                        # LEFT TO RIGHT
+                        # =========================
+                        elif moving_left_to_right:
+
+                            text = (
+                                f"{current_object} "
+                                f"moving left to right"
+                            )
+
+                        # =========================
+                        # RIGHT TO LEFT
+                        # =========================
+                        elif moving_right_to_left:
+
+                            text = (
+                                f"{current_object} "
+                                f"moving right to left"
+                            )
+
+                        # =========================
+                        # STOPPED / NORMAL
+                        # =========================
+                        else:
+
+                            if area > 18000:
+
+                                direction = (
+                                    get_safe_direction(
+                                        frame,
+                                        all_boxes
+                                    )
+                                )
+
+                                text = (
+                                    f"{current_object} ahead. "
+                                    f"{direction}"
+                                )
+
+                            else:
+
+                                text = None
+
+                else:
+
+                    text = None
+
+        # =========================
+        # DEFAULT
+        # =========================
+        else:
+
+            text = (
+                f"{current_object} ahead"
+            )
+
+        # =========================
+        # SPEAK CONTROL
+        # =========================
+        if current_time - last_speak >= delay:
+
+            print(text)
+
+            threading.Thread(
+            target=speak,
+            args=(text,),
+            daemon=True
+            ).start()
+
+            last_speak = current_time
+
+    # =========================
+    # DISPLAY
+    # =========================
+    cv2.imshow(
+        "Smart Glass System",
+        frame
+    )
+
+    # ESC EXIT
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+
+# =========================
+# CLEANUP
+# =========================
+cap.release()
+
+cv2.destroyAllWindows()
