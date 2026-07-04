@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 # =========================
 # SETTINGS
 # =========================
-VIDEO_PATH = "video_materials/bagnan_highroad_real_time.mp4"
+VIDEO_PATH = 0
 
 # =========================
 # LOAD MODELS
@@ -17,7 +17,7 @@ VIDEO_PATH = "video_materials/bagnan_highroad_real_time.mp4"
 model_coco = YOLO("yolov8n.pt")
 
 model_custom = YOLO(
-    "E:/ipsita_project/AI_smart_glass/best_fine2.pt",
+    "VISIARA-Smart_Blind_Assistence_System/best_fine2.pt",
     task="detect"
 )
 
