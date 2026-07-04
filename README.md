@@ -8,4 +8,4 @@ To excute Smart System follow these steps:
 
 4.Install dependencies from your file: pip install -r requirements.txt
 
-5.run main file in any command prompt: python smart_blind_assistence_system.py
+5.run main file in any command prompt: python Blind_assistence_system.py
